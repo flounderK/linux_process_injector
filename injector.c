@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <malloc.h>
 #include <fcntl.h>
+#include <string.h>
 
 
 #define FAILED_TO_TRACE() \
@@ -103,7 +104,7 @@ struct ProcMapsEntry {
     char ** path;
 };
 
-int save_process_state_and_inject_transitional_shellcode(int pid){
+int save_process_state_and_inject_transitional_shellcode(int pid, size_t size){
     struct iovec iov = {.iov_len = sizeof(saved_uregs),
                         .iov_base = &saved_uregs};
     if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) == -1){
@@ -113,28 +114,129 @@ int save_process_state_and_inject_transitional_shellcode(int pid){
     printf("[+] Registers saved\n");
     int fd;
     char buf[128];
+    memset(buf, 0, sizeof(buf));
     sprintf(buf, "/proc/%d/mem", pid);
 
     if ((fd = open(buf, O_RDWR)) == -1){
         perror("open");
         exit(1);
     }
-    tracee_pc_saved_data = malloc(&_binary_raw_shellcode_bin_size);
+    // overwrite current code
+    if ((tracee_pc_saved_data = malloc(&_binary_raw_shellcode_bin_size)) == NULL){
+        perror("malloc");
+        return -1;
+    }
     lseek(fd, saved_uregs.rip, SEEK_SET);
     read(fd, tracee_pc_saved_data, &_binary_raw_shellcode_bin_size);
     lseek(fd, saved_uregs.rip, SEEK_SET);
     write(fd, &_binary_raw_shellcode_bin_start, &_binary_raw_shellcode_bin_size);
     close(fd);
 
-    //debug print stuff
-    DumpHex(tracee_pc_saved_data, &_binary_raw_shellcode_bin_size);
+
     print_x86_64_registers(&saved_uregs);
+    DumpHex(tracee_pc_saved_data, &_binary_raw_shellcode_bin_size);
+
+    struct user_regs_struct injected_uregs;
+    memcpy(&injected_uregs, &saved_uregs, sizeof(saved_uregs));
+
+    injected_uregs.rdi = size;
+    iov.iov_base = &injected_uregs;
+
+    if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov) == -1){
+        printf("failed to set register state\n");
+        exit(1);
+    }
+
+    /*
+    memset(&injected_uregs, 0, sizeof(injected_uregs));
+    if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) == -1){
+        perror("ptrace");
+        exit(1);
+    }
+    print_x86_64_registers(&injected_uregs);
+    */
+
+
+    return 0;
+}
+
+int restore_process_state(pid){
+
+    struct iovec iov = {.iov_len = sizeof(saved_uregs),
+                        .iov_base = &saved_uregs};
+    ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov);
+
+    int fd;
+    char buf[128];
+    memset(buf, 0, sizeof(buf));
+    sprintf(buf, "/proc/%d/mem", pid);
+
+    if ((fd = open(buf, O_RDWR)) == -1){
+        perror("open");
+        exit(1);
+    }
+    // overwrite current code
+    lseek(fd, saved_uregs.rip, SEEK_SET);
+    write(fd, &tracee_pc_saved_data, &_binary_raw_shellcode_bin_size);
+    close(fd);
+
+    return 0;
+}
+
+/* fd - file descriptor for file to inject
+ * region_start - address of the new region added
+ *
+ */
+int write_binary(int pid, int shellcode_fd, size_t binary_size, void* region_start){
+
+    struct iovec iov = {.iov_len = sizeof(saved_uregs),
+                        .iov_base = &saved_uregs};
+    if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov) == -1){
+        perror("ptrace");
+        exit(1);
+    }
+
+    char working_memory[4096];
+    memset(working_memory, 0, sizeof(working_memory));
+    char buf[128];
+    memset(buf, 0, sizeof(buf));
+    size_t total_written = 0;
+    size_t num_read = 0;
+    size_t num_written = 0;
+    int memfd;
+    if (region_start == NULL){
+        return -1;
+    }
+
+    sprintf(buf, "/proc/%d/mem", pid);
+    if ((memfd = open(buf, O_RDWR)) == -1){
+        perror("open");
+        exit(1);
+    }
+    if (lseek(memfd, region_start, SEEK_SET) == -1){
+        perror("lseek");
+        exit(1);
+    }
+    while (total_written < binary_size){
+        if((num_read = read(shellcode_fd, working_memory, sizeof(working_memory))) == -1){
+            perror("read");
+            exit(1);
+        } else if (num_read == 0){
+            break;
+        }
+        if ((num_written = write(memfd, working_memory, num_read)) == -1){
+            perror("write");
+            exit(1);
+        }
+        total_written += num_written;
+    }
+    close(memfd);
 
     return 0;
 }
 
 
-int attach_and_inject(int pid, void* shellcode, size_t size){
+int attach_and_inject(int pid, int shellcode_fd, size_t size){
 
     printf("[+] Attaching to: %d\n", pid);
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1){
@@ -148,40 +250,87 @@ int attach_and_inject(int pid, void* shellcode, size_t size){
         FAILED_TO_TRACE();
     }
 
-    if (WIFEXITED(wstatus)){
-        printf("process exited\n");
-        FAILED_TO_TRACE();
-    } else if (WIFSIGNALED(wstatus)) {
-        printf("signaled \n");
-        FAILED_TO_TRACE();
-    }else if (WIFSTOPPED(wstatus)) {
+    if (WIFSTOPPED(wstatus)) {
+        // WSTOPSIG
         //stopped correctly
         printf("[+] Stopped target process\n");
-        save_process_state_and_inject_transitional_shellcode(pid);
+        save_process_state_and_inject_transitional_shellcode(pid, size);
+    } else {
+        printf("Incorrect wstatus\n");
+        FAILED_TO_TRACE();
     }
 
-
+    // Execute initial shellcode
     if (ptrace(PTRACE_CONT, pid, 0, 0) == -1){
         perror("ptrace");
     }
 
-    /*
-    puts("waitpid");
     if (waitpid(pid, &wstatus, WUNTRACED) == -1){
         perror("waitpid");
         FAILED_TO_TRACE();
     }
 
-    if (WIFEXITED(wstatus)){
-        printf("process exited\n");
+    // inital shellcode has finished running
+    if (WIFSTOPPED(wstatus)) {
+        // WSTOPSIG
+        printf("[+] Stopped target process again\n");
+    } else {
+        printf("Incorrect wstatus\n");
         FAILED_TO_TRACE();
-    } else if (WIFSIGNALED(wstatus)) {
-        printf("signaled \n");
-    }else if (WIFSTOPPED(wstatus)) {
-        //stopped correctly
-        printf("[+] Stopped target process again???\n");
     }
-    */
+
+    // find address that was mmapped by reading rip
+    struct iovec iov = {.iov_len = sizeof(saved_uregs),
+                        .iov_base = &uregs};
+    if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) == -1){
+        perror("ptrace");
+        exit(1);
+    }
+
+    // adjust rip to account for breakpoint that was just hit
+    uregs.rip = uregs.rip - 1;
+    size_t controlled_executable_region = uregs.rip;
+    printf("rip %p\n", controlled_executable_region);
+
+    // set regs to fix pc
+    if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov) == -1){
+        perror("ptrace");
+        exit(1);
+    }
+    // write binary to injectee and jump to address
+    write_binary(pid, shellcode_fd, size, controlled_executable_region);
+
+
+    //print_x86_64_registers(&uregs);
+
+    printf("[+] Executing shellcode\n");
+    // actual shellcode executes here
+    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1){
+        perror("ptrace");
+    }
+    if (waitpid(pid, &wstatus, WUNTRACED) == -1){
+        perror("waitpid");
+        FAILED_TO_TRACE();
+    }
+
+    if (WIFSTOPPED(wstatus)) {
+        // WSTOPSIG
+        //stopped correctly
+        printf("stopped %p\n", WSTOPSIG(wstatus));
+    } else {
+        printf("Incorrect wstatus\n");
+    }
+
+    //restore_process_state(pid);
+    while (1) {}
+
+
+
+    if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1){
+        perror("ptrace");
+        return -1;
+    }
+
 
 
     return 0;
@@ -189,16 +338,29 @@ int attach_and_inject(int pid, void* shellcode, size_t size){
 
 
 int main (int argc, char *argv[]) {
-    if (argc < 2) {
+    if (argc < 3) {
         printf("Usage: %s <pid> <binary>\n", argv[0]);
         exit(0);
     }
 
     int pid = atoi(argv[1]);
-    void* shellcode;
-    size_t size;
+    size_t size = 0x64;
+    struct stat sb;
 
-    attach_and_inject(pid, shellcode, size);
+    int fd;
+    if ((fd = open(argv[2], O_RDONLY)) == -1){
+        perror("open");
+        return -1;
+    }
+    if (fstat(fd, &sb) == -1){
+        printf("unable  to stat\n");
+        return -1;
+    }
+    size = sb.st_size;
+
+    attach_and_inject(pid, fd, size);
+
+    close(fd);
 
     return 0;
 }

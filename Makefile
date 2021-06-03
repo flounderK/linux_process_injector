@@ -18,8 +18,8 @@ OBJCOPY_FORMAT_SUFFIX=64-x86-64
 BINARY_ARCH=i386
 
 CDEBUG=-g
-CFLAGS=-g -fPIC
-SHELLCODE_CFLAGS=-fPIC -static -Os -fdata-sections -ffunction-sections -nostdlib --entry=_start -Wl,-Tlinkerscript.ld
+CFLAGS=-g -fPIC -I$(PWD) -I$(PWD)/include
+SHELLCODE_CFLAGS=-fPIC -static -I$(PWD) -I$(PWD)/include -Os -fdata-sections -ffunction-sections -nostdlib --entry=_start -Wl,-Tlinkerscript.ld
 
 BINARY=injector
 
@@ -30,7 +30,6 @@ BINARY=injector
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 all: clean $(BINARY)
-
 
 initial_injection.o: initial_injection.c
 	$(CC) $(SHELLCODE_CFLAGS) -c -o $@ $<
