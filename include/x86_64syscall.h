@@ -18,3 +18,14 @@ static inline long _syscall(long a, long b, long c, long d, long e, long f, long
     return rax;
 }
 
+#define STOREREG ("r14")
+
+#define _mmap(addr, length, prot, flags, fd, pgoffset) _syscall(__NR_mmap, addr, length, prot, flags, fd, pgoffset);
+#define _open(path, flags) _syscall(__NR_open, path, flags, 0, 0, 0, 0)
+#define _close(fd) _syscall(__NR_close, fd, 0, 0, 0, 0, 0)
+#define _read(fd, buf, nr) _syscall(__NR_read, fd, buf, nr, 0, 0, 0)
+#define _write(fd, buf, nr) _syscall(__NR_write, fd, buf, nr, 0, 0, 0)
+#define _kill(pid, sig) _syscall(__NR_kill, pid, sig, 0, 0, 0, 0)
+#define _ptrace(request, pid, addr, data) _syscall(__NR_ptrace, request, pid, addr, data, 0, 0)
+#define _getpid() _syscall(__NR_getpid, 0, 0, 0, 0, 0, 0)
+#define _msync(addr, len, flags) _syscall(__NR_msync, addr, len, flags, 0, 0, 0)
